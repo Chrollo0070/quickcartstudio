@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { Check, Copy, Download, HardDrive, ShieldCheck } from 'lucide-react';
+import { Check, Copy, Download, ExternalLink, HardDrive, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import type { DesktopArtifactInfo } from '@/lib/desktop-artifacts';
@@ -21,9 +21,17 @@ async function fetchDesktopArtifacts(): Promise<{
   return (await res.json()) as { artifacts: DesktopArtifactInfo[]; anyAvailable: boolean };
 }
 
-export function DesktopExeView({ isElectronRuntime }: { isElectronRuntime: boolean }) {
+export function DesktopExeView({
+  isElectronRuntime,
+  dataFilePath,
+}: {
+  isElectronRuntime: boolean;
+  dataFilePath?: string | null;
+}) {
   const [selectedId, setSelectedId] = useState<'zip' | 'nsis' | 'portable'>('zip');
   const [copied, setCopied] = useState(false);
+
+  const releaseUrl = process.env.NEXT_PUBLIC_DESKTOP_RELEASE_URL?.trim() || '';
 
   const artifactsQuery = useQuery({
     queryKey: ['desktop-exe-artifacts'],
@@ -118,6 +126,22 @@ export function DesktopExeView({ isElectronRuntime }: { isElectronRuntime: boole
                   </p>
                 )}
               </div>
+            ) : releaseUrl ? (
+              <div>
+                <p className="text-xs font-medium text-accent">Hosted release distribution</p>
+                <p className="mt-1 text-sm text-ink">
+                  Download signed-ready NSIS and Portable Windows builds from GitHub Releases.
+                </p>
+                <a
+                  href={releaseUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-ink whitespace-nowrap"
+                >
+                  <ExternalLink className="size-4" aria-hidden />
+                  Open GitHub Releases
+                </a>
+              </div>
             ) : (
               <div>
                 <p className="text-xs font-medium text-ink-2">Recommended deployment</p>
@@ -152,11 +176,16 @@ export function DesktopExeView({ isElectronRuntime }: { isElectronRuntime: boole
               </div>
             </div>
 
-            <div className="border-t border-line pt-3 text-xs text-ink-2">
-              <span className="font-medium text-ink">Current host:</span>{' '}
-              {isElectronRuntime
-                ? 'Running inside packaged Electron shell (IPC active)'
-                : 'Browser preview mode (IPC simulated against live /api/v1)'}
+            <div className="space-y-1 border-t border-line pt-3 text-xs text-ink-2">
+              <p>
+                <span className="font-medium text-ink">Current host:</span>{' '}
+                {isElectronRuntime
+                  ? 'Running inside packaged Electron shell (IPC active)'
+                  : 'Browser preview mode (IPC simulated against live /api/v1)'}
+              </p>
+              <p className="truncate font-mono text-[11px] text-ink-3">
+                Offline store: {dataFilePath ?? '%APPDATA%\\QuickCart\\quickcart-store.json'}
+              </p>
             </div>
           </div>
         </div>

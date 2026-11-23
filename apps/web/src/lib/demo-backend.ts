@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { SERVICE_NAME } from '@quickcart/shared';
 import {
   buildSeedBatches,
@@ -125,7 +127,44 @@ interface ShiftRecord {
   orders: number;
   cashOrders: number;
   cashCollected: number;
+  cardOrders: number;
+  cardCollected: number;
   closed: boolean;
+}
+
+export interface ShiftZReportRecord {
+  reportNumber: string;
+  shiftId: string;
+  openedAt: string;
+  closedAt: string;
+  closedBy: string;
+  orders: number;
+  cashOrders: number;
+  cardOrders: number;
+  openingCash: string;
+  cashCollected: string;
+  cardCollected: string;
+  grossSales: string;
+  expectedDrawer: string;
+  countedCash: string;
+  variance: string;
+  notes: string | null;
+}
+
+interface PersistedStoreSnapshot {
+  version: 1;
+  savedAt: string;
+  stockOnHand: Record<string, number>;
+  orders: OrderRecord[];
+  movements: MovementRecord[];
+  counts: CountRecord[];
+  refunds: RefundRecord[];
+  currentShift: ShiftRecord;
+  shiftHistory: ShiftZReportRecord[];
+  receiptCounter: number;
+  countCounter: number;
+  goodsReceiptCounter: number;
+  zReportCounter: number;
 }
 
 function round2(n: number): number {
@@ -172,12 +211,18 @@ export class DemoBackend {
   private readonly refunds = new Map<string, RefundRecord>();
   private readonly movements: MovementRecord[] = [];
   private readonly counts: CountRecord[] = [];
+  private readonly shiftHistory: ShiftZReportRecord[] = [];
+  private readonly storageFile: string | null;
   private currentShift: ShiftRecord;
   private receiptCounter = 1001;
   private countCounter = 1;
   private goodsReceiptCounter = 2;
+  private zReportCounter = 1;
 
-  constructor() {
+  constructor(dataDir: string | null = process.env.QUICKCART_DATA_DIR?.trim() || null) {
+    this.storageFile = dataDir
+      ? path.join(/*turbopackIgnore: true*/ path.resolve(/*turbopackIgnore: true*/ dataDir), 'quickcart-store.json')
+      : null;
     this.products = buildSeedProducts();
     this.productById = new Map(this.products.map((p) => [p.id, p]));
     this.productByBarcode = new Map(this.products.map((p) => [p.barcode, p]));
@@ -194,8 +239,88 @@ export class DemoBackend {
       orders: 0,
       cashOrders: 0,
       cashCollected: 0,
+      cardOrders: 0,
+      cardCollected: 0,
       closed: false,
     };
+    this.hydrateFromDisk();
+  }
+
+  private hydrateFromDisk(): void {
+    if (!this.storageFile || !fs.existsSync(this.storageFile)) return;
+    try {
+      const raw = fs.readFileSync(this.storageFile, 'utf8');
+      const snap = JSON.parse(raw) as Partial<PersistedStoreSnapshot>;
+      if (snap.version !== 1) return;
+      if (snap.stockOnHand) {
+        for (const [productId, qty] of Object.entries(snap.stockOnHand)) {
+          if (this.productById.has(productId) && Number.isFinite(qty)) {
+            this.stockOnHand.set(productId, qty);
+          }
+        }
+      }
+      if (Array.isArray(snap.orders)) {
+        for (const order of snap.orders) {
+          this.orders.set(order.id, order);
+          this.orderByIdempotency.set(order.idempotencyKey, order);
+        }
+      }
+      if (Array.isArray(snap.movements)) {
+        this.movements.push(...snap.movements);
+      }
+      if (Array.isArray(snap.counts)) {
+        this.counts.push(...snap.counts);
+      }
+      if (Array.isArray(snap.refunds)) {
+        for (const r of snap.refunds) this.refunds.set(r.refundId, r);
+      }
+      if (snap.currentShift) {
+        this.currentShift = {
+          ...snap.currentShift,
+          cardOrders: snap.currentShift.cardOrders ?? 0,
+          cardCollected: snap.currentShift.cardCollected ?? 0,
+        };
+      }
+      if (Array.isArray(snap.shiftHistory)) {
+        this.shiftHistory.push(...snap.shiftHistory);
+      }
+      if (typeof snap.receiptCounter === 'number') this.receiptCounter = snap.receiptCounter;
+      if (typeof snap.countCounter === 'number') this.countCounter = snap.countCounter;
+      if (typeof snap.goodsReceiptCounter === 'number') {
+        this.goodsReceiptCounter = snap.goodsReceiptCounter;
+      }
+      if (typeof snap.zReportCounter === 'number') this.zReportCounter = snap.zReportCounter;
+    } catch {
+      // Ignore corrupt snapshot and fall back cleanly to seeded baseline
+    }
+  }
+
+  private persistToDisk(): void {
+    if (!this.storageFile) return;
+    try {
+      const dir = path.dirname(this.storageFile);
+      fs.mkdirSync(dir, { recursive: true });
+      const snapshot: PersistedStoreSnapshot = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        stockOnHand: Object.fromEntries(this.stockOnHand.entries()),
+        orders: [...this.orders.values()],
+        movements: this.movements.slice(0, 500),
+        counts: this.counts.slice(0, 100),
+        refunds: [...this.refunds.values()],
+        currentShift: this.currentShift,
+        shiftHistory: this.shiftHistory.slice(0, 50),
+        receiptCounter: this.receiptCounter,
+        countCounter: this.countCounter,
+        goodsReceiptCounter: this.goodsReceiptCounter,
+        zReportCounter: this.zReportCounter,
+      };
+      const tmpPath = `${this.storageFile}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(snapshot, null, 2), 'utf8');
+      fs.renameSync(tmpPath, this.storageFile);
+    } catch {
+      // Never block POS mutations if local disk is read-only
+    }
   }
 
   private availableOf(productId: string): number {
@@ -454,6 +579,15 @@ export class DemoBackend {
   }
 
   handle(req: BackendRequest): BackendResponse {
+    const res = this.dispatch(req);
+    const upper = req.method.toUpperCase();
+    if (upper !== 'GET' && upper !== 'HEAD' && res.status >= 200 && res.status < 300) {
+      this.persistToDisk();
+    }
+    return res;
+  }
+
+  private dispatch(req: BackendRequest): BackendResponse {
     const path = '/' + req.segments.join('/');
     const method = req.method.toUpperCase();
     const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
@@ -465,7 +599,10 @@ export class DemoBackend {
         body: {
           status: 'ok',
           service: SERVICE_NAME,
-          description: 'QuickCart in-memory demo API (standalone mode)',
+          description: this.storageFile
+            ? 'QuickCart offline-persistent API (local disk store)'
+            : 'QuickCart in-memory demo API (standalone mode)',
+          persistence: this.storageFile ? 'disk' : 'memory',
           timestamp: new Date().toISOString(),
           uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
           checks: { database: 'up' },
@@ -1012,6 +1149,9 @@ export class DemoBackend {
             if (paymentMethod === 'CASH') {
               this.currentShift.cashOrders += 1;
               this.currentShift.cashCollected = round2(this.currentShift.cashCollected + order.grandTotal);
+            } else {
+              this.currentShift.cardOrders += 1;
+              this.currentShift.cardCollected = round2(this.currentShift.cardCollected + order.grandTotal);
             }
           }
           return {
@@ -1033,28 +1173,71 @@ export class DemoBackend {
               orders: this.currentShift.orders,
               cashOrders: this.currentShift.cashOrders,
               cashCollected: fmt2(this.currentShift.cashCollected),
+              cardOrders: this.currentShift.cardOrders,
+              cardCollected: fmt2(this.currentShift.cardCollected),
               expectedDrawer: fmt2(this.currentShift.openingCash + this.currentShift.cashCollected),
             },
           },
         };
       }
 
+      if (method === 'GET' && path === '/pos/shifts/history') {
+        return { status: 200, body: this.shiftHistory };
+      }
+
       if (method === 'POST' && path === '/pos/shifts') {
+        const parsedOpening = Number(body.openingCash ?? 2000);
+        const openingCash = Number.isFinite(parsedOpening) && parsedOpening >= 0 ? round2(parsedOpening) : 2000;
         this.currentShift = {
           id: `shift-${crypto.randomUUID().slice(0, 8)}`,
           openedAt: new Date().toISOString(),
-          openingCash: Number(body.openingCash ?? 2000) || 2000,
+          openingCash,
           orders: 0,
           cashOrders: 0,
           cashCollected: 0,
+          cardOrders: 0,
+          cardCollected: 0,
           closed: false,
         };
         return { status: 201, body: { shiftId: this.currentShift.id } };
       }
 
       if (method === 'POST' && path === '/pos/shifts/close') {
+        if (this.currentShift.closed) {
+          return fail(409, 'Shift is already closed', 'SHIFT_ALREADY_CLOSED');
+        }
+        const expected = round2(this.currentShift.openingCash + this.currentShift.cashCollected);
+        const rawCounted = body.closingCash ?? body.countedCash;
+        const parsedCounted =
+          rawCounted !== undefined && rawCounted !== '' ? Number(rawCounted) : expected;
+        if (!Number.isFinite(parsedCounted) || parsedCounted < 0) {
+          return fail(400, 'Counted cash must be a non-negative number', 'INVALID_CLOSING_CASH');
+        }
+        const counted = round2(parsedCounted);
+        const variance = round2(counted - expected);
+        const gross = round2(this.currentShift.cashCollected + this.currentShift.cardCollected);
+        const notes = typeof body.notes === 'string' && body.notes.trim() ? body.notes.trim().slice(0, 200) : null;
+        const zReport: ShiftZReportRecord = {
+          reportNumber: `Z-PAN-${String(this.zReportCounter++).padStart(4, '0')}`,
+          shiftId: this.currentShift.id,
+          openedAt: this.currentShift.openedAt,
+          closedAt: new Date().toISOString(),
+          closedBy: staff.fullName,
+          orders: this.currentShift.orders,
+          cashOrders: this.currentShift.cashOrders,
+          cardOrders: this.currentShift.cardOrders,
+          openingCash: fmt2(this.currentShift.openingCash),
+          cashCollected: fmt2(this.currentShift.cashCollected),
+          cardCollected: fmt2(this.currentShift.cardCollected),
+          grossSales: fmt2(gross),
+          expectedDrawer: fmt2(expected),
+          countedCash: fmt2(counted),
+          variance: `${variance >= 0 ? '+' : '-'}${fmt2(Math.abs(variance))}`,
+          notes,
+        };
         this.currentShift.closed = true;
-        return { status: 200, body: { closed: true } };
+        this.shiftHistory.unshift(zReport);
+        return { status: 200, body: { closed: true, zReport } };
       }
 
       if (method === 'GET' && path === '/pos/refunds') {

@@ -35,8 +35,29 @@ export interface ShiftSummary {
     orders: number;
     cashOrders: number;
     cashCollected: string;
+    cardOrders?: number;
+    cardCollected?: string;
     expectedDrawer: string;
   } | null;
+}
+
+export interface ShiftZReport {
+  reportNumber: string;
+  shiftId: string;
+  openedAt: string;
+  closedAt: string;
+  closedBy: string;
+  orders: number;
+  cashOrders: number;
+  cardOrders: number;
+  openingCash: string;
+  cashCollected: string;
+  cardCollected: string;
+  grossSales: string;
+  expectedDrawer: string;
+  countedCash: string;
+  variance: string;
+  notes: string | null;
 }
 
 export interface PendingRefund {
@@ -141,12 +162,19 @@ export function posCurrentShift(): Promise<ShiftSummary> {
   return staffRequest('/pos/shifts/current');
 }
 
-export function posCloseShift(closingCash: string): Promise<unknown> {
+export function posCloseShift(
+  closingCash: string,
+  notes?: string,
+): Promise<{ closed: boolean; zReport?: ShiftZReport }> {
   return staffRequest('/pos/shifts/close', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ closingCash }),
+    body: JSON.stringify(notes ? { closingCash, notes } : { closingCash }),
   });
+}
+
+export function posShiftHistory(): Promise<ShiftZReport[]> {
+  return staffRequest('/pos/shifts/history');
 }
 
 export function posRequestRefund(

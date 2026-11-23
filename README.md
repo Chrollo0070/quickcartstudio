@@ -1,127 +1,95 @@
 # QuickCart
 
-**Supermarket self-checkout, POS and real-time inventory platform.**
+**Cross-platform supermarket self-checkout, Windows POS desktop (`.exe`), and real-time branch inventory platform.**
 
-Customers scan product barcodes, build a cart, pay and get a digital receipt —
-while staff POS, inventory and dashboards work off **one pricing engine, one
-order domain and one stock ledger**. This repo is a production-minded modular
-monolith (NestJS + Next.js + PostgreSQL) built phase by phase; see
-[docs/implementation-status.md](docs/implementation-status.md) for the exact
-state.
+Customers scan product barcodes, build a cart, pay, and receive an itemized GST receipt — while staff POS registers, stockroom ledgers, and analytics dashboards share **one server-authoritative pricing engine, one order domain, and one stock ledger**.
 
-## Stack
+---
 
-|          |                                                                                                      |
-| -------- | ---------------------------------------------------------------------------------------------------- |
-| Frontend | Next.js 16 (App Router) · React 19 · Tailwind CSS 4 · TanStack Query · Zod                           |
-| Backend  | NestJS 12 (modular monolith) · REST `/api/v1` · Swagger · Socket.IO (Phase 4) · BullMQ (Phase 3+)    |
-| Data     | PostgreSQL 17 · Prisma 7 (driver adapters, Decimal money) · Redis 7 (Phase 3+)                       |
-| Quality  | ESLint 9 · Prettier · Jest (API, ESM mode) · Vitest (shared) · Playwright (Phase 6) · GitHub Actions |
-| Infra    | Docker Compose (Postgres + Redis) · Turborepo · pnpm workspaces                                      |
+## Key Capabilities
 
-Docs: [architecture](docs/architecture.md) ·
-[ER diagram](docs/er-diagram.md) ·
-[state transitions](docs/order-state-transitions.md) ·
-[API guidelines](docs/api-guidelines.md) ·
-[ADRs](docs/decisions/).
+- **Windows Desktop POS (`.exe`) (`apps/desktop` & `/desktop`)** — Electron shell bundling the Next.js `standalone` server on `127.0.0.1` with a sandboxed preload IPC bridge (`contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`), frameless Windows titlebar, `F1`–`F11` counter shortcuts, live Windows printer enumeration, 80mm/58mm thermal slip output, Shift Close Z-Report reconciliation, and **offline-first persistence** in `%APPDATA%\QuickCart\quickcart-store.json`.
+- **Customer Self-Checkout (`/shop`)** — Camera barcode scanner (`@zxing/browser`) + manual catalogue search, GST breakdown (CGST/SGST), loyalty redemption, promo coupons (`WELCOME10`, `SAVE25`), and digital receipts.
+- **Staff POS & Inventory (`/pos`, `/inventory`, `/catalogue`, `/dashboard`)** — Keyboard-wedge barcode scans, park/resume sales, cash tendering with change calculation, refund approval workflow, FEFO near-expiry batch tracking, low-stock alerts, and live branch metrics.
+- **Modular Monolith Backend (`apps/api`)** — NestJS 12 + Prisma 7 + PostgreSQL 17 (40 models), BigInt paise money math (`packages/shared`), RBAC guards with rotating SHA-256 refresh tokens, HMAC-verified payment webhooks, and Socket.IO live updates.
 
-## Prerequisites
+---
 
-- Node.js **≥ 22.12** (22 LTS used in development/CI)
-- pnpm 10 (`corepack enable` or `npm i -g pnpm`)
-- One of:
-  - **Docker** (recommended) — for Postgres + Redis via Compose, **or**
-  - **nothing else** — use the built-in embedded dev Postgres fallback (no Docker
-    needed; Redis is only required from Phase 3).
+## Architecture & Tech Stack
 
-## Quick start
+| Layer | Technologies |
+| --- | --- |
+| **Web & Desktop UI** | Next.js 16 (App Router, `output: 'standalone'`) · React 19 · Tailwind CSS 4 · TanStack Query · Zod |
+| **Desktop Shell (`.exe`)** | Electron 34 · `electron-builder` (Windows NSIS Installer, Portable `.exe`, and x64 `.zip` bundle) |
+| **API Backend** | NestJS 12 · Prisma 7 · PostgreSQL 17 · Socket.IO · Swagger (`/api/v1/docs`) · Helmet & Throttler |
+| **Quality & CI** | ESLint 9 · TypeScript 5.9 · Node Test (`node:test`) · Jest · Vitest · Playwright E2E · GitHub Actions |
+
+Further documentation: [architecture](docs/architecture.md) · [ER diagram](docs/er-diagram.md) · [order state transitions](docs/order-state-transitions.md) · [API guidelines](docs/api-guidelines.md) · [security review](docs/security-review.md) · [ADRs](docs/decisions/).
+
+---
+
+## Quick Start (Zero-Setup Demo Mode)
+
+Requires **Node.js ≥ 22.12**:
 
 ```bash
-# 1. Install
-pnpm install
-
-# 2. Environment (set JWT_ACCESS_SECRET — e.g. openssl rand -base64 48)
-cp apps/api/.env.example apps/api/.env
-cp apps/web/.env.example apps/web/.env.local
-
-# 3. Database — pick ONE:
-pnpm db:up                       # (a) Docker Compose: Postgres :5432 + Redis :6379
-pnpm db:embedded:up              # (b) No Docker: embedded Postgres on :5433
-#    For (b), switch DATABASE_URL in apps/api/.env to the :5433 line
-#    documented in apps/api/.env.example.
-
-# 4. Migrate + seed
-pnpm db:migrate
-pnpm db:seed
-
-# 5. Run (two terminals or `pnpm dev` for both)
-pnpm --filter @quickcart/api dev      # API  → http://localhost:4000
-pnpm --filter @quickcart/web dev      # Web  → http://localhost:3000
+npm install
+npm run dev
 ```
 
-Then:
+Open:
+- Storefront & Self-Checkout: <http://localhost:3000/shop>
+- Windows Desktop POS Workspace: <http://localhost:3000/desktop>
+- Staff Login: <http://localhost:3000/login>
 
-- Web landing page: <http://localhost:3000>
-- API health: <http://localhost:4000/api/v1/health>
-- Swagger UI: <http://localhost:4000/api/v1/docs>
+Seeded store: **QuickMart Panaji** (`QM-PAN`, Goa GST context). Demo password: **`QuickMart!dev123`**
 
-### All commands
+| Role | Email |
+| --- | --- |
+| Admin | `admin@quickmart.dev` |
+| Store Manager | `manager@quickmart.dev` |
+| Cashier | `cashier@quickmart.dev` |
+| Inventory Staff | `inventory@quickmart.dev` |
 
-| Command                                      | What it does                                                           |
-| -------------------------------------------- | ---------------------------------------------------------------------- |
-| `pnpm dev`                                   | Run API + web concurrently (watch mode).                               |
-| `pnpm build` / `lint` / `typecheck` / `test` | Full workspace via Turborepo.                                          |
-| `pnpm format` / `format:check`               | Prettier write/check.                                                  |
-| `pnpm db:up` / `db:down`                     | Docker Compose Postgres + Redis.                                       |
-| `pnpm db:embedded:up` / `:down` / `status`   | Embedded dev Postgres (no Docker), port 5433, data in `infra/.pgdata`. |
-| `pnpm db:migrate`                            | `prisma migrate deploy` (apps/api).                                    |
-| `pnpm db:seed`                               | Idempotent QuickMart seed (36 products, users, batches, POs, coupons). |
-| `pnpm db:generate`                           | Regenerate the Prisma client (also runs on build).                     |
+Demo EAN-13 barcodes: Amul Milk `8900100000424` · Britannia Bread `8900100000844` · Parle-G `8900100001964`.
 
-## Demo data & credentials (development only)
+---
 
-Seeded store: **QuickMart Panaji** (`QM-PAN`, Panaji/GA — GST context).
-Password for all seeded staff accounts: **`QuickMart!dev123`**
+## Building the Windows Desktop `.exe`
 
-| Role            | Email                     |
-| --------------- | ------------------------- |
-| Admin / owner   | `admin@quickmart.dev`     |
-| Store manager   | `manager@quickmart.dev`   |
-| Cashier         | `cashier@quickmart.dev`   |
-| Inventory staff | `inventory@quickmart.dev` |
+### On Windows (One-Click)
+Double-click `apps\desktop\build-exe.bat` or run:
 
-Extras: 3 customers with loyalty balances, coupons `WELCOME10` and `SAVE25`,
-low-stock items (Amul Milk 500 ml, Egg Tray, Lay's), near-expiry batches (milk,
-dahi, bread, paneer), a completed goods receipt with `PURCHASE_RECEIPT` ledger
-entries and an open cashier shift. The seed is **idempotent** — safe to re-run.
+```powershell
+.\apps\desktop\scripts\build-win-exe.ps1 -Target all
+```
 
-Demo barcodes for scanner testing: milk `8900100000424`, bread `8900100000844`,
-Parle-G `8900100001964`.
+Artifacts are generated in `apps/desktop/release/`:
+- `QuickCart-Setup-0.1.0.exe` — Guided Windows NSIS installer
+- `QuickCart-0.1.0-Portable.exe` — Single-file portable executable
 
-## Testing
+### Via GitHub Actions (Automated Release)
+Push a version tag (e.g., `git tag v0.1.0 && git push --tags`) or trigger **`Build Windows Desktop (.exe)`** manually in GitHub Actions to compile on `windows-latest`, generate `SHA256SUMS.txt`, and publish downloadable `.exe` binaries to GitHub Releases.
+
+---
+
+## Hosting & Production Deployment
+
+- **Portfolio Web Hosting (Vercel)**: `vercel.json` is preconfigured at the repository root. Set `NEXT_PUBLIC_DESKTOP_RELEASE_URL` to your GitHub Release URL so visitors can download the Windows `.exe` directly from `/desktop`.
+- **Full-Stack Production (Render + Vercel + PostgreSQL)**:
+  - Deploy `apps/api` + managed PostgreSQL using the included [`render.yaml`](render.yaml) blueprint and [`apps/api/Dockerfile`](apps/api/Dockerfile).
+  - Deploy `apps/web` to Vercel with `API_ORIGIN=https://<your-api-domain>` and `NEXT_PUBLIC_DEMO_MODE=false`.
+  - See [docs/deployment.md](docs/deployment.md) for production environment variables, migrations, and Redis schedulers.
+
+---
+
+## Testing & Verification
 
 ```bash
-pnpm test                 # everything (turbo)
-pnpm --filter @quickcart/api test        # Jest (ESM mode; see ADR-006)
-pnpm --filter @quickcart/shared test     # Vitest
+npm run lint
+npm run typecheck
+npm run build
+npx --yes tsx --test apps/web/src/lib/demo-backend.test.ts apps/web/src/lib/demo-persistence.test.ts apps/web/src/lib/desktop-receipt.test.ts apps/desktop/src/receipt-html.test.ts
 ```
 
-Phase 0 ships 20 meaningful unit tests (money/rounding math, env validation,
-Zod validation pipe). Integration tests (checkout lifecycle, duplicate webhooks,
-concurrent checkout, atomic decrement) arrive with their phases — the plan is in
-[implementation-status.md](docs/implementation-status.md).
-
-## Deployment (target shape)
-
-- Frontend → Vercel/Next.js host. Backend → container host (Render/Railway/Fly).
-- Database → managed PostgreSQL; Redis → managed Redis. `prisma migrate deploy`
-  in the release pipeline.
-- The app stays runnable via Docker Compose for local development.
-- Detailed deployment guide lands in Phase 6.
-
-## Known limitations
-
-See [docs/implementation-status.md → Known issues](docs/implementation-status.md#known-issues--limitations-phase-0).
-Notably: payment flows are mock/test-mode only; GST configuration requires
-review by a qualified accountant before any commercial use; no raw card data is
-ever collected or stored.
+> **Disclaimer**: Demo checkout uses a simulated payment provider and seeded Indian GST rates for development and portfolio demonstration. Connect a live payment gateway and review tax rules with an accountant before commercial store use.

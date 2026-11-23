@@ -29,10 +29,14 @@ async function dispatch(
       : NextResponse.json(result.body, { status: result.status });
 
   if (result.setRefreshCookie !== undefined) {
+    const isHttps =
+      request.nextUrl.protocol === 'https:' ||
+      request.headers.get('x-forwarded-proto') === 'https';
     if (result.setRefreshCookie === null) {
       response.cookies.set(REFRESH_COOKIE, '', {
         httpOnly: true,
         sameSite: 'lax',
+        secure: isHttps,
         path: '/',
         maxAge: 0,
       });
@@ -40,6 +44,7 @@ async function dispatch(
       response.cookies.set(REFRESH_COOKIE, result.setRefreshCookie, {
         httpOnly: true,
         sameSite: 'lax',
+        secure: isHttps,
         path: '/',
         maxAge: 7 * 24 * 60 * 60,
       });

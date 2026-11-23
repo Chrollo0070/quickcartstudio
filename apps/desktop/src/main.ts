@@ -100,6 +100,7 @@ async function startEmbeddedWebServer(): Promise<string> {
       NODE_ENV: 'production',
       HOSTNAME: '127.0.0.1',
       PORT: String(serverPort),
+      QUICKCART_DATA_DIR: app.getPath('userData'),
     },
     stdio: 'pipe',
   });
@@ -263,7 +264,21 @@ function registerIpcHandlers(): void {
     isPackaged: app.isPackaged,
     serverPort,
     userDataPath: app.getPath('userData'),
+    dataFilePath: path.join(app.getPath('userData'), 'quickcart-store.json'),
   }));
+
+  ipcMain.handle('quickcart:shell:open-external', async (_event, rawUrl: string) => {
+    try {
+      const parsed = new URL(String(rawUrl));
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { ok: false, error: 'Blocked unsupported URL protocol' };
+      }
+      await shell.openExternal(parsed.toString());
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Invalid URL' };
+    }
+  });
 
   ipcMain.handle('quickcart:printer:list', async (): Promise<PrinterInfo[]> => {
     if (!mainWindow) return [];

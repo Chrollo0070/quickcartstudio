@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { Printer, ScanBarcode, Vault, Download } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Download, Printer, RefreshCw, ScanBarcode, Vault } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DRAWER_KICK_HEX,
@@ -16,6 +16,12 @@ export interface HardwareEvent {
   device: string;
   detail: string;
 }
+
+const SAMPLE_PRINTERS = [
+  'EPSON TM-T82III Thermal (USB001)',
+  'Star TSP143IIIU Cutter (USB002)',
+  'Microsoft Print to PDF',
+];
 
 const SAMPLE_SLIP: ThermalSlipInput = {
   invoiceNumber: 'QM-PAN-1000',
@@ -36,21 +42,54 @@ const SAMPLE_SLIP: ThermalSlipInput = {
 };
 
 export function DesktopHardwareView({
+  isElectronRuntime,
   lastReceipt,
   events,
   onSimulateScan,
   onKickDrawer,
   onPrintSlip,
 }: {
+  isElectronRuntime: boolean;
   lastReceipt: ThermalSlipInput | null;
   events: HardwareEvent[];
   onSimulateScan: (barcode: string, name: string) => void;
   onKickDrawer: () => void;
-  onPrintSlip: (slip: ThermalSlipInput, paperWidth: 42 | 32, silent: boolean) => void;
+  onPrintSlip: (
+    slip: ThermalSlipInput,
+    paperWidth: 42 | 32,
+    silent: boolean,
+    deviceName?: string,
+  ) => void;
 }) {
   const [paperWidth, setPaperWidth] = useState<42 | 32>(42);
   const [silentPrint, setSilentPrint] = useState(true);
-  const [selectedPrinter, setSelectedPrinter] = useState('EPSON TM-T82III Thermal (USB001)');
+  const [printers, setPrinters] = useState<string[]>(SAMPLE_PRINTERS);
+  const [usingSystemPrinters, setUsingSystemPrinters] = useState(false);
+  const [selectedPrinter, setSelectedPrinter] = useState(SAMPLE_PRINTERS[0]!);
+
+  const loadSystemPrinters = useCallback(async () => {
+    if (!window.quickcartDesktop?.printer?.list) return;
+    try {
+      const detected = await window.quickcartDesktop.printer.list();
+      if (Array.isArray(detected) && detected.length > 0) {
+        const names = detected.map((p) => p.displayName || p.name).filter(Boolean);
+        if (names.length > 0) {
+          setPrinters(names);
+          const defaultPrinter = detected.find((p) => p.isDefault);
+          setSelectedPrinter(defaultPrinter?.displayName || defaultPrinter?.name || names[0]!);
+          setUsingSystemPrinters(true);
+        }
+      }
+    } catch {
+      // Keep sample fallback list when printer enumeration fails
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isElectronRuntime) {
+      void loadSystemPrinters();
+    }
+  }, [isElectronRuntime, loadSystemPrinters]);
 
   const activeSlip = lastReceipt ?? SAMPLE_SLIP;
   const formattedText = formatThermalText(activeSlip, paperWidth);
@@ -73,7 +112,9 @@ export function DesktopHardwareView({
             <div>
               <h2 className="text-base font-semibold text-ink">Thermal receipt printer</h2>
               <p className="mt-0.5 text-sm text-ink-2">
-                Silent Windows spooler printing via Electron offscreen BrowserWindow.
+                {usingSystemPrinters
+                  ? `Detected ${printers.length} Windows spooler printers via Electron IPC.`
+                  : 'Silent Windows spooler printing via Electron offscreen BrowserWindow.'}
               </p>
             </div>
             <div className="flex items-center gap-1 rounded-lg bg-raised p-1">
@@ -100,18 +141,32 @@ export function DesktopHardwareView({
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <div>
-              <label htmlFor="printer-select" className="block text-xs font-medium text-ink-2">
-                Windows printer device
-              </label>
+              <div className="flex items-center justify-between">
+                <label htmlFor="printer-select" className="block text-xs font-medium text-ink-2">
+                  Windows printer device
+                </label>
+                {isElectronRuntime && (
+                  <button
+                    type="button"
+                    onClick={() => void loadSystemPrinters()}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-accent hover:text-ink"
+                  >
+                    <RefreshCw className="size-3" aria-hidden />
+                    Refresh
+                  </button>
+                )}
+              </div>
               <select
                 id="printer-select"
                 value={selectedPrinter}
                 onChange={(event) => setSelectedPrinter(event.target.value)}
                 className="mt-1.5 h-10 w-full rounded-lg border border-line bg-paper px-3 text-sm text-ink focus:border-accent focus:outline-none"
               >
-                <option value="EPSON TM-T82III Thermal (USB001)">EPSON TM-T82III Thermal (USB001)</option>
-                <option value="Star TSP143IIIU Cutter (USB002)">Star TSP143IIIU Cutter (USB002)</option>
-                <option value="Microsoft Print to PDF">Microsoft Print to PDF</option>
+                {printers.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -133,7 +188,9 @@ export function DesktopHardwareView({
           <div className="mt-4 flex flex-wrap gap-2">
             <Button
               size="sm"
-              onClick={() => onPrintSlip(activeSlip, paperWidth, silentPrint)}
+              onClick={() =>
+                onPrintSlip(activeSlip, paperWidth, silentPrint, silentPrint ? selectedPrinter : undefined)
+              }
               className="gap-1.5"
             >
               <Printer className="size-4" aria-hidden />

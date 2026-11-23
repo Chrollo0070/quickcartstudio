@@ -35,12 +35,12 @@ const shaCache = new Map<string, { mtimeMs: number; size: number; sha256: string
 
 function resolveReleaseDir(): string {
   const candidates = [
-    path.resolve(process.cwd(), 'apps', 'desktop', 'release'),
-    path.resolve(process.cwd(), '..', 'desktop', 'release'),
-    path.resolve(process.cwd(), '..', '..', 'apps', 'desktop', 'release'),
+    path.resolve(/*turbopackIgnore: true*/ process.cwd(), 'apps', 'desktop', 'release'),
+    path.resolve(/*turbopackIgnore: true*/ process.cwd(), '..', 'desktop', 'release'),
+    path.resolve(/*turbopackIgnore: true*/ process.cwd(), '..', '..', 'apps', 'desktop', 'release'),
   ];
   for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
+    if (fs.existsSync(/*turbopackIgnore: true*/ dir)) return dir;
   }
   return candidates[0]!;
 }
@@ -58,7 +58,7 @@ function computeFileSha256(filePath: string, stat: fs.Stats): string {
     return cached.sha256;
   }
   const hash = crypto.createHash('sha256');
-  const fd = fs.openSync(filePath, 'r');
+  const fd = fs.openSync(/*turbopackIgnore: true*/ filePath, 'r');
   try {
     const chunk = Buffer.allocUnsafe(1024 * 1024);
     let bytesRead = 0;
@@ -79,9 +79,9 @@ export function resolveArtifactFile(
   const meta = ALLOWED_ARTIFACTS[target];
   if (!meta) return null;
   const releaseDir = resolveReleaseDir();
-  const filePath = path.join(releaseDir, meta.filename);
-  if (!fs.existsSync(filePath)) return null;
-  const stat = fs.statSync(filePath);
+  const filePath = path.join(/*turbopackIgnore: true*/ releaseDir, meta.filename);
+  if (!fs.existsSync(/*turbopackIgnore: true*/ filePath)) return null;
+  const stat = fs.statSync(/*turbopackIgnore: true*/ filePath);
   if (!stat.isFile()) return null;
   return { filePath, filename: meta.filename, contentType: meta.contentType, stat };
 }

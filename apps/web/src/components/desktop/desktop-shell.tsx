@@ -37,11 +37,22 @@ interface QuickcartDesktopBridge {
     setKiosk: (enabled: boolean) => Promise<{ isMaximized: boolean; isKiosk: boolean }>;
     close: () => Promise<void>;
   };
+  runtime?: {
+    getInfo: () => Promise<{
+      version: string;
+      electronVersion: string;
+      dataFilePath?: string;
+    }>;
+  };
   printer: {
+    list?: () => Promise<Array<{ name: string; displayName?: string; isDefault?: boolean }>>;
     printReceipt: (payload: ThermalSlipInput, deviceName?: string) => Promise<{ ok: boolean }>;
   };
   drawer: {
     open: () => Promise<{ ok: boolean; commandHex: string; timestamp: string }>;
+  };
+  shell?: {
+    openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
   };
 }
 
@@ -77,11 +88,13 @@ export function DesktopShell() {
   const [isMinimized, setIsMinimized] = useState(false);
   const [isKiosk, setIsKiosk] = useState(false);
   const [isElectronRuntime, setIsElectronRuntime] = useState(false);
+  const [dataFilePath, setDataFilePath] = useState<string | null>(null);
   const [lastReceipt, setLastReceipt] = useState<ThermalSlipInput | null>(null);
   const [hardwareEvents, setHardwareEvents] = useState<HardwareEvent[]>([]);
   const [incomingBarcode, setIncomingBarcode] = useState<{ code: string; seq: number } | null>(
     null,
   );
+  const demoModeEnabled = process.env.NEXT_PUBLIC_DEMO_MODE !== 'false';
 
   const registerShortcutsRef = useRef({
     newSale: () => {},
@@ -92,7 +105,16 @@ export function DesktopShell() {
   });
 
   useEffect(() => {
-    setIsElectronRuntime(typeof window !== 'undefined' && Boolean(window.quickcartDesktop));
+    const hasBridge = typeof window !== 'undefined' && Boolean(window.quickcartDesktop);
+    setIsElectronRuntime(hasBridge);
+    if (hasBridge && window.quickcartDesktop?.runtime?.getInfo) {
+      void window.quickcartDesktop.runtime
+        .getInfo()
+        .then((info) => {
+          if (info.dataFilePath) setDataFilePath(info.dataFilePath);
+        })
+        .catch(() => undefined);
+    }
   }, []);
 
   const healthQuery = useQuery({
@@ -156,12 +178,12 @@ export function DesktopShell() {
   }, [pushHardwareEvent]);
 
   const handlePrintSlip = useCallback(
-    (slip: ThermalSlipInput, paperWidth: 42 | 32, silent: boolean) => {
+    (slip: ThermalSlipInput, paperWidth: 42 | 32, silent: boolean, deviceName?: string) => {
       if (window.quickcartDesktop?.printer) {
-        void window.quickcartDesktop.printer.printReceipt(slip).then(() => {
+        void window.quickcartDesktop.printer.printReceipt(slip, deviceName).then(() => {
           pushHardwareEvent(
             'Thermal printer',
-            `Printed ${slip.invoiceNumber} (${paperWidth === 42 ? '80mm' : '58mm'})`,
+            `Printed ${slip.invoiceNumber} (${paperWidth === 42 ? '80mm' : '58mm'}${deviceName ? ` · ${deviceName}` : ''})`,
           );
         });
       } else {
@@ -404,19 +426,21 @@ export function DesktopShell() {
                     <div>
                       <p className="truncate text-sm font-medium text-ink">{user.fullName}</p>
                       <p className="text-xs text-ink-2">{user.roles.join(', ')}</p>
-                      <div className="mt-2.5 flex flex-wrap gap-1.5">
-                        {DEMO_OPERATORS.filter((op) => op.email !== user.email).map((op) => (
-                          <button
-                            key={op.email}
-                            type="button"
-                            disabled={operatorLogin.isPending}
-                            onClick={() => operatorLogin.mutate(op.email)}
-                            className="rounded-md border border-line bg-paper px-2 py-1 text-[11px] font-medium text-ink-2 transition-colors hover:border-accent hover:text-ink"
-                          >
-                            {op.label}
-                          </button>
-                        ))}
-                      </div>
+                      {demoModeEnabled && (
+                        <div className="mt-2.5 flex flex-wrap gap-1.5">
+                          {DEMO_OPERATORS.filter((op) => op.email !== user.email).map((op) => (
+                            <button
+                              key={op.email}
+                              type="button"
+                              disabled={operatorLogin.isPending}
+                              onClick={() => operatorLogin.mutate(op.email)}
+                              className="rounded-md border border-line bg-paper px-2 py-1 text-[11px] font-medium text-ink-2 transition-colors hover:border-accent hover:text-ink"
+                            >
+                              {op.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       <button
                         type="button"
                         onClick={() => operatorLogout.mutate()}
@@ -425,7 +449,7 @@ export function DesktopShell() {
                         Lock terminal (Sign out)
                       </button>
                     </div>
-                  ) : (
+                  ) : demoModeEnabled ? (
                     <div>
                       <p className="text-xs font-medium text-ink">Quick operator unlock</p>
                       <p className="mt-0.5 text-[11px] text-ink-2">
@@ -445,16 +469,40 @@ export function DesktopShell() {
                         ))}
                       </div>
                     </div>
+                  ) : (
+                    <div>
+                      <p className="text-xs font-medium text-ink">Staff authentication</p>
+                      <Link
+                        href="/login"
+                        className="mt-2 inline-flex h-8 w-full items-center justify-center rounded-lg bg-accent px-3 text-xs font-medium text-white hover:bg-ink"
+                      >
+                        Sign in with staff account
+                      </Link>
+                    </div>
                   )}
                 </div>
 
-                <Link
-                  href="/"
-                  className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-ink-2 hover:text-ink"
-                >
-                  <ExternalLink className="size-3.5" aria-hidden />
-                  Open web storefront
-                </Link>
+                {isElectronRuntime ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = `${window.location.origin}/`;
+                      void window.quickcartDesktop?.shell?.openExternal(url);
+                    }}
+                    className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-ink-2 hover:text-ink"
+                  >
+                    <ExternalLink className="size-3.5" aria-hidden />
+                    Open web storefront
+                  </button>
+                ) : (
+                  <Link
+                    href="/"
+                    className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-ink-2 hover:text-ink"
+                  >
+                    <ExternalLink className="size-3.5" aria-hidden />
+                    Open web storefront
+                  </Link>
+                )}
               </div>
             </aside>
           )}
@@ -523,6 +571,7 @@ export function DesktopShell() {
 
             {section === 'hardware' && (
               <DesktopHardwareView
+                isElectronRuntime={isElectronRuntime}
                 lastReceipt={lastReceipt}
                 events={hardwareEvents}
                 onSimulateScan={handleSimulateScan}
@@ -531,7 +580,12 @@ export function DesktopShell() {
               />
             )}
 
-            {section === 'package' && <DesktopExeView isElectronRuntime={isElectronRuntime} />}
+            {section === 'package' && (
+              <DesktopExeView
+                isElectronRuntime={isElectronRuntime}
+                dataFilePath={dataFilePath}
+              />
+            )}
           </main>
         </div>
       </div>

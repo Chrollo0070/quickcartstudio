@@ -17,6 +17,7 @@ export interface DesktopRuntimeInfo {
   isPackaged: boolean;
   serverPort: number;
   userDataPath: string;
+  dataFilePath: string;
 }
 
 const desktopBridge = {
@@ -49,6 +50,10 @@ const desktopBridge = {
   drawer: {
     open: (): Promise<{ ok: boolean; commandHex: string; timestamp: string }> =>
       ipcRenderer.invoke('quickcart:drawer:open'),
+  },
+  shell: {
+    openExternal: (url: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('quickcart:shell:open-external', url),
   },
 };
 

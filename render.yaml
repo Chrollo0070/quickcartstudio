@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: quickcart-api
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quickcart-db
+          property: connectionString
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: PAYMENT_WEBHOOK_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+
+databases:
+  - name: quickcart-db
+    plan: free
+    postgresMajorVersion: '16'

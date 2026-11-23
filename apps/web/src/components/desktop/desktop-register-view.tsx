@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import {
   calculateTenderChange,
   formatThermalText,
+  formatZReportText,
   QUICK_SCAN_ITEMS,
   suggestCashDenominations,
   type ThermalSlipInput,
@@ -15,9 +16,11 @@ import {
 import {
   listPosSessions,
   openPosSession,
+  posCloseShift,
   posComplete,
   posCurrentShift,
   posGetSession,
+  posOpenShift,
   posQuote,
   posRemoveItem,
   posResume,
@@ -27,6 +30,7 @@ import {
   posUpdateQty,
   type CartView,
   type PosItem,
+  type ShiftZReport,
 } from '@/lib/pos-client';
 
 interface QuoteState {
@@ -34,6 +38,12 @@ interface QuoteState {
   taxTotal: string;
   subtotal: string;
   hash: string;
+}
+
+function formatSignedInr(value: string | number): string {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num === 0) return '₹0.00';
+  return `${num > 0 ? '+' : '-'}₹${Math.abs(num).toFixed(2)}`;
 }
 
 export function DesktopRegisterView({
@@ -59,6 +69,8 @@ export function DesktopRegisterView({
 }) {
   const queryClient = useQueryClient();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const pendingSessionRef = useRef<Promise<string> | null>(null);
   const [session, setSession] = useState<CartView | null>(null);
   const [quote, setQuote] = useState<QuoteState | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -66,6 +78,11 @@ export function DesktopRegisterView({
   const [cashTendered, setCashTendered] = useState('');
   const [statusMessage, setStatusMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [lastSlip, setLastSlip] = useState<ThermalSlipInput | null>(null);
+  const [closingShiftOpen, setClosingShiftOpen] = useState(false);
+  const [countedCashInput, setCountedCashInput] = useState('');
+  const [closeNotes, setCloseNotes] = useState('');
+  const [openingFloatInput, setOpeningFloatInput] = useState('2000.00');
+  const [lastZReport, setLastZReport] = useState<ShiftZReport | null>(null);
 
   const shiftQuery = useQuery({ queryKey: ['desktop-pos-shift'], queryFn: posCurrentShift });
   const parkedQuery = useQuery({ queryKey: ['desktop-pos-parked'], queryFn: listPosSessions });
@@ -73,6 +90,7 @@ export function DesktopRegisterView({
   const refreshCart = useCallback(
     async (sessionId: string) => {
       const updated = await posGetSession(sessionId);
+      activeSessionIdRef.current = updated.id;
       setSession(updated);
       if (updated.items.length > 0) {
         const quoted = await posQuote(sessionId);
@@ -87,11 +105,23 @@ export function DesktopRegisterView({
   );
 
   const ensureSession = useCallback(async (): Promise<string> => {
-    if (session) return session.id;
-    const created = await openPosSession();
-    const cart = await posGetSession(created.sessionId);
-    setSession(cart);
-    return created.sessionId;
+    if (activeSessionIdRef.current) return activeSessionIdRef.current;
+    if (session) {
+      activeSessionIdRef.current = session.id;
+      return session.id;
+    }
+    if (pendingSessionRef.current) return pendingSessionRef.current;
+    const creation = (async () => {
+      const created = await openPosSession();
+      activeSessionIdRef.current = created.sessionId;
+      const cart = await posGetSession(created.sessionId);
+      setSession(cart);
+      return created.sessionId;
+    })().finally(() => {
+      pendingSessionRef.current = null;
+    });
+    pendingSessionRef.current = creation;
+    return creation;
   }, [session]);
 
   const handleScanBarcode = useCallback(
@@ -140,6 +170,7 @@ export function DesktopRegisterView({
   const newSaleMutation = useMutation({
     mutationFn: openPosSession,
     onSuccess: async (created) => {
+      activeSessionIdRef.current = created.sessionId;
       const cart = await posGetSession(created.sessionId);
       setSession(cart);
       setQuote(null);
@@ -157,6 +188,7 @@ export function DesktopRegisterView({
       return posSuspend(session.id);
     },
     onSuccess: () => {
+      activeSessionIdRef.current = null;
       setSession(null);
       setQuote(null);
       setCashTendered('');
@@ -200,6 +232,7 @@ export function DesktopRegisterView({
       return { res, slip, method };
     },
     onSuccess: ({ res, slip, method }) => {
+      activeSessionIdRef.current = null;
       setSession(null);
       setQuote(null);
       setCashTendered('');
@@ -215,6 +248,38 @@ export function DesktopRegisterView({
       void queryClient.invalidateQueries({ queryKey: ['desktop-pos-shift'] });
       void queryClient.invalidateQueries({ queryKey: ['desktop-pos-parked'] });
       void queryClient.invalidateQueries({ queryKey: ['desktop-inventory'] });
+    },
+    onError: (err) => setStatusMessage({ ok: false, text: (err as Error).message }),
+  });
+
+  const closeShiftMutation = useMutation({
+    mutationFn: () =>
+      posCloseShift(countedCashInput || shiftQuery.data?.shift?.expectedDrawer || '0.00', closeNotes),
+    onSuccess: (result) => {
+      setClosingShiftOpen(false);
+      setCloseNotes('');
+      if (result.zReport) {
+        setLastZReport(result.zReport);
+        setStatusMessage({
+          ok: true,
+          text: `Shift closed · Z-Report ${result.zReport.reportNumber} (variance ${formatSignedInr(result.zReport.variance)})`,
+        });
+      } else {
+        setStatusMessage({ ok: true, text: 'Shift closed.' });
+      }
+      void queryClient.invalidateQueries({ queryKey: ['desktop-pos-shift'] });
+    },
+    onError: (err) => setStatusMessage({ ok: false, text: (err as Error).message }),
+  });
+
+  const openShiftMutation = useMutation({
+    mutationFn: () => posOpenShift(openingFloatInput || '2000.00'),
+    onSuccess: () => {
+      setStatusMessage({
+        ok: true,
+        text: `Opened new shift with ₹${Number(openingFloatInput || 2000).toFixed(2)} drawer float.`,
+      });
+      void queryClient.invalidateQueries({ queryKey: ['desktop-pos-shift'] });
     },
     onError: (err) => setStatusMessage({ ok: false, text: (err as Error).message }),
   });
@@ -246,18 +311,19 @@ export function DesktopRegisterView({
       {/* Left Column: Barcode/Search Entry, Quick Shelf, Cart Ledger */}
       <div className="flex flex-col gap-5">
         <section className="rounded-xl border border-line bg-card p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
               <h2 className="text-base font-semibold text-ink">Lane 01 · Active basket</h2>
               <p className="mt-0.5 text-xs text-ink-2">
                 Type an EAN-13 barcode + Enter, search by product name, or click a quick-scan staple.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {session ? (
                 <Button
                   size="sm"
                   variant="secondary"
+                  className="whitespace-nowrap"
                   disabled={suspendMutation.isPending}
                   onClick={() => suspendMutation.mutate()}
                 >
@@ -266,6 +332,7 @@ export function DesktopRegisterView({
               ) : (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   disabled={newSaleMutation.isPending}
                   onClick={() => newSaleMutation.mutate()}
                 >
@@ -495,6 +562,7 @@ export function DesktopRegisterView({
                     variant="secondary"
                     onClick={async () => {
                       const resumed = await posResume(entry.id);
+                      activeSessionIdRef.current = resumed.id;
                       setSession(resumed);
                       await refreshCart(entry.id);
                     }}
@@ -593,35 +661,193 @@ export function DesktopRegisterView({
         </section>
 
         <section className="rounded-xl border border-line bg-card p-5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-ink">Shift cash drawer</h3>
-            <Button size="sm" variant="ghost" onClick={onKickDrawer} className="gap-1.5">
-              <Vault className="size-3.5" aria-hidden />
-              Open drawer
-            </Button>
-          </div>
-          {shift ? (
-            <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-xs text-ink-2">Completed sales</dt>
-                <dd className="mt-0.5 font-mono text-base font-semibold tabular-nums text-ink">
-                  {shift.orders}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-xs text-ink-2">Expected drawer</dt>
-                <dd
-                  data-testid="desktop-expected-drawer"
-                  className="mt-0.5 font-mono text-base font-semibold tabular-nums text-ink"
+            <div className="flex items-center gap-1">
+              <Button size="sm" variant="ghost" onClick={onKickDrawer} className="gap-1.5">
+                <Vault className="size-3.5" aria-hidden />
+                Open drawer
+              </Button>
+              {shift && !closingShiftOpen && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setCountedCashInput(shift.expectedDrawer);
+                    setClosingShiftOpen(true);
+                  }}
                 >
-                  ₹{shift.expectedDrawer}
-                </dd>
-              </div>
-            </dl>
+                  Close shift
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {shift ? (
+            <>
+              <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <dt className="text-xs text-ink-2">Completed sales</dt>
+                  <dd className="mt-0.5 font-mono text-base font-semibold tabular-nums text-ink">
+                    {shift.orders}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-ink-2">Expected drawer</dt>
+                  <dd
+                    data-testid="desktop-expected-drawer"
+                    className="mt-0.5 font-mono text-base font-semibold tabular-nums text-ink"
+                  >
+                    ₹{shift.expectedDrawer}
+                  </dd>
+                </div>
+              </dl>
+
+              {closingShiftOpen && (
+                <div
+                  data-testid="shift-close-panel"
+                  className="mt-4 rounded-lg border border-line bg-paper p-3.5"
+                >
+                  <p className="text-xs font-semibold text-ink">End-of-shift cash count (Z-Report)</p>
+                  <div className="mt-2.5 space-y-2.5">
+                    <div>
+                      <label
+                        htmlFor="counted-cash-input"
+                        className="block text-[11px] font-medium text-ink-2"
+                      >
+                        Counted cash in drawer (INR)
+                      </label>
+                      <Input
+                        id="counted-cash-input"
+                        inputMode="decimal"
+                        value={countedCashInput}
+                        onChange={(event) =>
+                          setCountedCashInput(event.target.value.replace(/[^0-9.]/g, ''))
+                        }
+                        className="mt-1 h-9 font-mono text-sm"
+                      />
+                    </div>
+                    {(() => {
+                      const expectedNum = Number(shift.expectedDrawer);
+                      const countedNum = countedCashInput ? Number(countedCashInput) : expectedNum;
+                      const diff = Math.round((countedNum - expectedNum) * 100) / 100;
+                      return (
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-ink-2">Drawer variance</span>
+                          <span
+                            data-testid="shift-close-variance"
+                            className={`font-mono font-semibold tabular-nums ${
+                              diff === 0
+                                ? 'text-accent'
+                                : diff < 0
+                                  ? 'text-[#b91c1c]'
+                                  : 'text-ink'
+                            }`}
+                          >
+                            {diff === 0
+                              ? '₹0.00 (Exact)'
+                              : `${diff > 0 ? '+' : '-'}₹${Math.abs(diff).toFixed(2)}`}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                    <div>
+                      <label
+                        htmlFor="shift-notes-input"
+                        className="block text-[11px] font-medium text-ink-2"
+                      >
+                        Handover note (optional)
+                      </label>
+                      <Input
+                        id="shift-notes-input"
+                        value={closeNotes}
+                        onChange={(event) => setCloseNotes(event.target.value)}
+                        placeholder="e.g. Evening lane handover"
+                        className="mt-1 h-9 text-xs"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 pt-1">
+                      <Button
+                        size="sm"
+                        disabled={closeShiftMutation.isPending}
+                        onClick={() => closeShiftMutation.mutate()}
+                      >
+                        {closeShiftMutation.isPending ? 'Closing…' : 'Issue Z-Report'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setClosingShiftOpen(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
           ) : (
-            <p className="mt-2 text-xs text-ink-2">No open shift on this terminal.</p>
+            <div className="mt-3 space-y-2.5">
+              <p className="text-xs text-ink-2">
+                Shift closed. Enter an opening float to start the next lane shift.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  aria-label="Opening cash float"
+                  inputMode="decimal"
+                  value={openingFloatInput}
+                  onChange={(event) =>
+                    setOpeningFloatInput(event.target.value.replace(/[^0-9.]/g, ''))
+                  }
+                  className="h-9 font-mono text-sm"
+                />
+                <Button
+                  size="sm"
+                  className="whitespace-nowrap"
+                  disabled={openShiftMutation.isPending}
+                  onClick={() => openShiftMutation.mutate()}
+                >
+                  Open shift
+                </Button>
+              </div>
+            </div>
           )}
         </section>
+
+        {lastZReport && (
+          <section className="rounded-xl border border-line bg-card p-5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-ink">Last shift Z-Report</h3>
+                <p className="font-mono text-xs text-ink-2">
+                  {lastZReport.reportNumber} · Variance {formatSignedInr(lastZReport.variance)}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setLastZReport(null)}
+              >
+                Dismiss
+              </Button>
+            </div>
+            <pre
+              data-testid="desktop-z-report"
+              className="receipt mt-3 overflow-x-auto rounded-lg border border-line p-3 text-[11px] leading-relaxed text-ink"
+            >
+              {formatZReportText(
+                {
+                  ...lastZReport,
+                  closedAt: new Date(lastZReport.closedAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  }),
+                },
+                42,
+              )}
+            </pre>
+          </section>
+        )}
 
         {lastSlip && (
           <section className="rounded-xl border border-line bg-card p-5">

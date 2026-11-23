@@ -92,7 +92,12 @@ export const IPC_BRIDGE_CHANNELS = [
   {
     channel: 'quickcart:runtime:info',
     direction: 'Renderer -> Main',
-    purpose: 'Returns packaged version, Electron/Node runtime, ephemeral local port & userData path',
+    purpose: 'Returns packaged version, Electron/Node runtime, local port & offline data path',
+  },
+  {
+    channel: 'quickcart:shell:open-external',
+    direction: 'Renderer -> Main',
+    purpose: 'Opens validated http/https storefront URLs in the OS browser without trapping the frameless window',
   },
 ] as const;
 
@@ -229,3 +234,49 @@ export function formatThermalText(receipt: ThermalSlipInput, width = 42): string
 
   return out.join('\n');
 }
+
+export interface ZReportSlipInput {
+  reportNumber: string;
+  closedAt: string;
+  closedBy: string;
+  orders: number;
+  cashOrders: number;
+  cardOrders: number;
+  openingCash: string;
+  cashCollected: string;
+  cardCollected: string;
+  grossSales: string;
+  expectedDrawer: string;
+  countedCash: string;
+  variance: string;
+  notes?: string | null;
+}
+
+export function formatZReportText(report: ZReportSlipInput, width = 42): string {
+  const rule = '-'.repeat(width);
+  const out: string[] = [
+    centerLine('QUICKMART PANAJI — Z-REPORT', width),
+    centerLine(`Shift Close ${report.reportNumber}`, width),
+    rule,
+    pairLine('Closed By', report.closedBy, width),
+    pairLine('Closed At', report.closedAt, width),
+    rule,
+    pairLine('Total Orders', String(report.orders), width),
+    pairLine('Cash Sales', `${report.cashOrders} / INR ${report.cashCollected}`, width),
+    pairLine('Card / UPI Sales', `${report.cardOrders} / INR ${report.cardCollected}`, width),
+    pairLine('Gross Sales', `INR ${report.grossSales}`, width),
+    rule,
+    pairLine('Opening Float', `INR ${report.openingCash}`, width),
+    pairLine('Expected Drawer', `INR ${report.expectedDrawer}`, width),
+    pairLine('Counted Cash', `INR ${report.countedCash}`, width),
+    pairLine('Drawer Variance', `INR ${report.variance}`, width),
+  ];
+  if (report.notes) {
+    out.push(rule);
+    out.push(`Note: ${report.notes}`.slice(0, width));
+  }
+  out.push(rule);
+  out.push(centerLine('END OF SHIFT RECONCILIATION', width));
+  return out.join('\n');
+}
+

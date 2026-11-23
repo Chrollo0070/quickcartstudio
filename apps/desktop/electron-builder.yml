@@ -21,6 +21,7 @@ asar: true
 
 win:
   icon: build/icon.ico
+  artifactName: QuickCart-${version}-win-${arch}.${ext}
   target:
     - target: nsis
       arch:
@@ -42,6 +43,3 @@ nsis:
 
 portable:
   artifactName: QuickCart-${version}-Portable.exe
-
-zip:
-  artifactName: QuickCart-${version}-win-x64.zip
