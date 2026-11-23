@@ -12,7 +12,8 @@ const nextConfig: NextConfig = {
   transpilePackages: ['@quickcart/shared'],
   // Standalone output powers the Electron desktop distribution
   // (apps/desktop) — a self-contained server.js + minimal node_modules.
-  output: 'standalone',
+  // On Vercel, let Vercel's native Next.js build pipeline handle output.
+  ...(process.env.VERCEL ? {} : { output: 'standalone' as const }),
   async rewrites() {
     if (!apiOrigin) return [];
     return [{ source: '/api/v1/:path*', destination: `${apiOrigin}/api/v1/:path*` }];

@@ -29,16 +29,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - name: Install monorepo dependencies & build Next.js standalone
         run: |
-          npm ci || npm install
+          npm install --no-audit --no-fund
           npm run build
 
       - name: Install Electron desktop dependencies
         working-directory: apps/desktop
-        run: npm install
+        run: npm install --no-audit --no-fund
 
       - name: Generate Windows icons & stage Next.js standalone runtime
         working-directory: apps/desktop
