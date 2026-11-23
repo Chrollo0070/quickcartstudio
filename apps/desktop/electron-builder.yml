@@ -1,0 +1,47 @@
+appId: dev.quickcart.desktop
+productName: QuickCart
+copyright: Copyright © 2026 QuickCart
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - build/icon.png
+  - package.json
+
+extraResources:
+  - from: resources/standalone
+    to: standalone
+    filter:
+      - '**/*'
+
+asar: true
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+
+nsis:
+  artifactName: QuickCart-Setup-${version}.exe
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: QuickCart POS
+  uninstallDisplayName: QuickCart POS Desktop
+
+portable:
+  artifactName: QuickCart-${version}-Portable.exe
+
+zip:
+  artifactName: QuickCart-${version}-win-x64.zip

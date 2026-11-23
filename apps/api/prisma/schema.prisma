@@ -1,0 +1,1037 @@
+// QuickCart data model (spec §14 + operational entities required by §8, §11, §12).
+//
+// Conventions:
+// - Money is `Decimal` (never Float) — see docs/decisions/ADR-003-money-as-decimal.md.
+//   Prices/amounts use scale 2 (paise); quantities use scale 3 (kg in grams precision).
+// - IDs are UUIDv7 for index-friendly ordering.
+// - Historical records (orders, movements, receipts) keep value snapshots so
+//   later catalogue edits never rewrite history.
+// - Referential defaults: required relations Restrict deletes; optional
+//   relations SetNull. Join tables cascade.
+// - State machines and transaction boundaries are documented in
+//   docs/architecture.md and docs/order-state-transitions.md.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum UnitType {
+  PIECE
+  PACK
+  KG
+  G
+  L
+  ML
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum BarcodeFormat {
+  EAN13
+  UPC_A
+  CODE128
+  OTHER
+}
+
+enum PriceMode {
+  TAX_INCLUSIVE
+  TAX_EXCLUSIVE
+}
+
+enum RoundingMode {
+  HALF_UP
+  HALF_EVEN
+  FLOOR
+  CEIL
+}
+
+enum CheckoutChannel {
+  SELF_CHECKOUT
+  POS
+}
+
+enum CheckoutSessionStatus {
+  OPEN
+  SUSPENDED // POS only
+  EXPIRED
+  CANCELLED
+  CONVERTED // became an order
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  COMPLETED
+  CANCELLED
+  FAILED
+  PARTIALLY_REFUNDED
+  FULLY_REFUNDED
+}
+
+enum PaymentProviderKind {
+  MOCK
+  RAZORPAY
+  CASH
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  COMPLETED
+  FAILED
+}
+
+enum TaxSplit {
+  CGST_SGST // intra-state
+  IGST // inter-state
+}
+
+enum StockMovementType {
+  SALE
+  RETURN
+  PURCHASE_RECEIPT
+  MANUAL_ADJUSTMENT
+  TRANSFER_OUT
+  TRANSFER_IN
+  RESERVATION
+  RESERVATION_RELEASE
+}
+
+enum StockReservationStatus {
+  ACTIVE
+  CONVERTED
+  RELEASED
+  EXPIRED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SUBMITTED
+  PARTIALLY_RECEIVED
+  COMPLETED
+  CANCELLED
+}
+
+enum GoodsReceiptStatus {
+  DRAFT
+  COMPLETED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  DRAFT
+  IN_PROGRESS
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum StockTransferStatus {
+  DRAFT
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+enum LoyaltyLedgerType {
+  EARN
+  REDEEM
+  REVERSAL
+  EXPIRY
+  ADJUSTMENT
+}
+
+enum PromotionKind {
+  PERCENT
+  FIXED
+}
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+enum NotificationKind {
+  LOW_STOCK
+  NEAR_EXPIRY
+  NEW_ORDER
+  PAYMENT
+  SYSTEM
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy: branches & settings
+// ---------------------------------------------------------------------------
+
+model Branch {
+  id       String   @id @default(uuid(7)) @db.Uuid
+  code     String   @unique
+  name     String
+  address  String?
+  city     String?
+  /// State code used for GST place-of-supply decisions (e.g. "KA").
+  state    String?
+  pincode  String?
+  gstin    String?
+  phone    String?
+  isActive Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             User[]            @relation("BranchUsers")
+  settings          StoreSettings?
+  branchProducts    BranchProduct[]
+  inventoryBalances InventoryBalance[]
+  inventoryBatches  InventoryBatch[]
+  stockMovements    StockMovement[]
+  stockReservations StockReservation[]
+  checkoutSessions  CheckoutSession[]
+  orders            Order[]
+  cashierShifts     CashierShift[]
+  purchaseOrders    PurchaseOrder[]
+  goodsReceipts     GoodsReceipt[]
+  stockCounts       StockCount[]
+  transfersOut      StockTransfer[]   @relation("TransferFrom")
+  transfersIn       StockTransfer[]   @relation("TransferTo")
+  promotions        Promotion[]
+  coupons           Coupon[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+}
+
+model StoreSettings {
+  id       String  @id @default(uuid(7)) @db.Uuid
+  branchId String  @unique @db.Uuid
+  branch   Branch  @relation(fields: [branchId], references: [id])
+
+  currency             String        @default("INR")
+  taxMode              PriceMode     @default(TAX_EXCLUSIVE)
+  roundingMode         RoundingMode  @default(HALF_UP)
+  /// Loyalty points earned per currency unit of eligible spend.
+  loyaltyEarnRate      Decimal       @default(0.01) @db.Decimal(10, 4)
+  /// Currency value of one loyalty point at redemption.
+  loyaltyRedeemRate    Decimal       @default(1) @db.Decimal(10, 4)
+  loyaltyMinRedeemPoints Int         @default(50)
+  loyaltyMaxRedeemPercent Decimal    @default(50) @db.Decimal(5, 2)
+  /// Invoice number prefix, e.g. "QM-PAN-".
+  invoicePrefix        String        @default("INV-")
+  timezone             String        @default("Asia/Kolkata")
+  updatedAt            DateTime      @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Identity, RBAC & sessions
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  email        String     @unique
+  phone        String?
+  /// bcrypt/argon2 hash only — raw passwords are never stored.
+  passwordHash String
+  fullName     String
+  status       UserStatus @default(ACTIVE)
+  /// Staff home branch; null for platform-level admins.
+  branchId     String?    @db.Uuid
+  branch       Branch?    @relation("BranchUsers", fields: [branchId], references: [id])
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  roles                 UserRole[]
+  refreshTokens         RefreshToken[]
+  ordersAsCashier       Order[]
+  shifts                CashierShift[]
+  sessionsAsOperator    CheckoutSession[]
+  movementsAsActor      StockMovement[]
+  countsStarted         StockCount[]       @relation("CountStartedBy")
+  countsApproved        StockCount[]       @relation("CountApprovedBy")
+  transfersRequested    StockTransfer[]
+  purchaseOrdersCreated PurchaseOrder[]
+  goodsReceiptsReceived GoodsReceipt[]
+  refundsRequested      Refund[]           @relation("RefundRequestedBy")
+  refundsApproved       Refund[]           @relation("RefundApprovedBy")
+  auditLogsAsActor      AuditLog[]
+}
+
+model Role {
+  id          String  @id @default(uuid(7)) @db.Uuid
+  name        String  @unique // ADMIN, MANAGER, CASHIER, INVENTORY_STAFF, CUSTOMER
+  description String?
+  isSystem    Boolean @default(false)
+  createdAt   DateTime @default(now())
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String  @id @default(uuid(7)) @db.Uuid
+  key         String  @unique // e.g. "inventory:adjust:approve"
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+}
+
+model UserRole {
+  userId String @db.Uuid
+  roleId String @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Hash of the token — the raw token exists only with the client.
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Customers & loyalty
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id    String @id @default(uuid(7)) @db.Uuid
+  name  String
+  phone String @unique
+  email String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  loyaltyAccount   LoyaltyAccount?
+  sessions         CheckoutSession[]
+  orders           Order[]
+  couponRedemptions CouponRedemption[]
+}
+
+model LoyaltyAccount {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  customerId     String   @unique @db.Uuid
+  customer       Customer @relation(fields: [customerId], references: [id])
+  /// Derived from ledger entries; updated transactionally with each entry.
+  points         Int      @default(0)
+  lifetimeEarned Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  entries LoyaltyLedgerEntry[]
+}
+
+model LoyaltyLedgerEntry {
+  id        String @id @default(uuid(7)) @db.Uuid
+  accountId String @db.Uuid
+  account   LoyaltyAccount @relation(fields: [accountId], references: [id])
+
+  type        LoyaltyLedgerType
+  /// Signed delta: positive earns/reversals, negative redemptions/expiry.
+  pointsDelta Int
+  balanceAfter Int
+  /// Unique per business event so a retried completion cannot double-earn.
+  idempotencyKey String? @unique
+  note           String?
+  /// For EARN entries: when the awarded points expire.
+  expiresAt      DateTime?
+  sourceOrderId  String?  @db.Uuid
+  sourceOrder    Order?   @relation(fields: [sourceOrderId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([accountId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Category {
+  id       String  @id @default(uuid(7)) @db.Uuid
+  name     String
+  slug     String  @unique
+  parentId String? @db.Uuid
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+
+  products Product[]
+}
+
+model Brand {
+  id   String @id @default(uuid(7)) @db.Uuid
+  name String
+  slug String @unique
+
+  products Product[]
+}
+
+model TaxCategory {
+  id       String  @id @default(uuid(7)) @db.Uuid
+  name     String  @unique // e.g. "GST 5%"
+  /// GST rate as a fraction (0.05 = 5%).
+  rate     Decimal @db.Decimal(5, 4)
+  isActive Boolean @default(true)
+
+  products Product[]
+}
+
+model Product {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  sku         String        @unique
+  name        String
+  description String?
+  status      ProductStatus @default(ACTIVE)
+  unit        UnitType
+  /// Cash register price for the branch without a price override.
+  sellingPrice Decimal      @db.Decimal(10, 2)
+  mrp         Decimal?      @db.Decimal(10, 2)
+  /// Null → fall back to StoreSettings.taxMode.
+  taxInclusive Boolean?
+  isWeighed   Boolean       @default(false) // staff/customer enters weight; no camera weight inference
+  isAgeRestricted       Boolean @default(false)
+  requiresStaffAssistance Boolean @default(false)
+  imageUrl    String?
+  categoryId  String?       @db.Uuid
+  category    Category?     @relation(fields: [categoryId], references: [id])
+  brandId     String?       @db.Uuid
+  brand       Brand?        @relation(fields: [brandId], references: [id])
+  taxCategoryId String        @db.Uuid
+  taxCategory TaxCategory   @relation(fields: [taxCategoryId], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  barcodes          ProductBarcode[]
+  branchProducts    BranchProduct[]
+  balances          InventoryBalance[]
+  batches           InventoryBatch[]
+  movements         StockMovement[]
+  sessionItems      CheckoutSessionItem[]
+  reservations      StockReservation[]
+  orderItems        OrderItem[]
+  purchaseOrderLines PurchaseOrderLine[]
+  goodsReceiptLines GoodsReceiptLine[]
+  stockCountLines   StockCountLine[]
+  transferLines     StockTransferLine[]
+  promotions        Promotion[]
+
+  @@index([categoryId])
+  @@index([status])
+}
+
+model ProductBarcode {
+  id        String        @id @default(uuid(7)) @db.Uuid
+  productId String        @db.Uuid
+  product   Product       @relation(fields: [productId], references: [id])
+  /// Globally unique so the scan lookup is a single indexed hit.
+  barcode   String        @unique
+  format    BarcodeFormat
+  isPrimary Boolean       @default(false)
+  createdAt DateTime      @default(now())
+
+  @@index([productId])
+}
+
+model BranchProduct {
+  branchId   String  @db.Uuid
+  productId  String  @db.Uuid
+  branch     Branch  @relation(fields: [branchId], references: [id])
+  product    Product @relation(fields: [productId], references: [id])
+  /// Null → Product.sellingPrice applies.
+  priceOverride Decimal? @db.Decimal(10, 2)
+  isAvailable   Boolean  @default(true)
+
+  @@id([branchId, productId])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory
+// ---------------------------------------------------------------------------
+
+model InventoryBalance {
+  branchId  String  @db.Uuid
+  productId String  @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+
+  onHand           Decimal  @default(0) @db.Decimal(14, 3)
+  reserved         Decimal  @default(0) @db.Decimal(14, 3)
+  lowStockThreshold Decimal @default(0) @db.Decimal(14, 3)
+  updatedAt        DateTime @updatedAt
+
+  @@id([branchId, productId])
+  @@index([branchId, lowStockThreshold])
+}
+
+model InventoryBatch {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  branchId  String    @db.Uuid
+  productId String    @db.Uuid
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+  batchNumber String
+  expiryDate  DateTime?
+  quantity    Decimal   @default(0) @db.Decimal(14, 3)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  movements        StockMovement[]
+  goodsReceiptLines GoodsReceiptLine[]
+  stockCountLines  StockCountLine[]
+  transferLines    StockTransferLine[]
+
+  @@unique([branchId, productId, batchNumber])
+  @@index([expiryDate])
+}
+
+model StockMovement {
+  id        String @id @default(uuid(7)) @db.Uuid
+  branchId  String @db.Uuid
+  productId String @db.Uuid
+  batchId   String? @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+  batch     InventoryBatch? @relation(fields: [batchId], references: [id])
+  actorUserId String? @db.Uuid
+  actorUser User?   @relation(fields: [actorUserId], references: [id])
+
+  /// Signed quantity: negative reduces stock, positive increases it.
+  type     StockMovementType
+  quantity Decimal @db.Decimal(14, 3)
+  reason   String?
+  /// Loose reference to the originating document ("order", "checkout_session",
+  /// "goods_receipt", "stock_count", "stock_transfer", "refund").
+  refType  String?
+  refId    String? @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@index([branchId, productId, createdAt])
+  @@index([type, createdAt])
+  @@index([refType, refId])
+}
+
+model StockReservation {
+  id        String @id @default(uuid(7)) @db.Uuid
+  branchId  String @db.Uuid
+  productId String @db.Uuid
+  sessionId String @db.Uuid
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  product   Product @relation(fields: [productId], references: [id])
+  session   CheckoutSession @relation(fields: [sessionId], references: [id])
+
+  quantity  Decimal @db.Decimal(14, 3)
+  status    StockReservationStatus @default(ACTIVE)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sessionId, productId])
+  @@index([status, expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Procurement
+// ---------------------------------------------------------------------------
+
+model Supplier {
+  id          String  @id @default(uuid(7)) @db.Uuid
+  name        String  @unique
+  contactName String?
+  phone       String?
+  email       String?
+  gstin       String?
+  address     String?
+  isActive    Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  purchaseOrders PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id        String @id @default(uuid(7)) @db.Uuid
+  number    String @unique
+  supplierId String @db.Uuid
+  supplier  Supplier @relation(fields: [supplierId], references: [id])
+  branchId  String @db.Uuid
+  branch    Branch @relation(fields: [branchId], references: [id])
+  status    PurchaseOrderStatus @default(DRAFT)
+  expectedAt DateTime?
+  createdByUserId String? @db.Uuid
+  createdByUser User? @relation(fields: [createdByUserId], references: [id])
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines         PurchaseOrderLine[]
+  goodsReceipts GoodsReceipt[]
+
+  @@index([branchId, status])
+}
+
+model PurchaseOrderLine {
+  id             String @id @default(uuid(7)) @db.Uuid
+  purchaseOrderId String @db.Uuid
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  productId      String @db.Uuid
+  product        Product @relation(fields: [productId], references: [id])
+  orderedQty     Decimal @db.Decimal(14, 3)
+  receivedQty    Decimal @default(0) @db.Decimal(14, 3)
+  unitCost       Decimal @db.Decimal(12, 2)
+
+  @@unique([purchaseOrderId, productId])
+}
+
+model GoodsReceipt {
+  id        String @id @default(uuid(7)) @db.Uuid
+  number    String @unique
+  purchaseOrderId String? @db.Uuid
+  purchaseOrder PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  branchId  String @db.Uuid
+  branch    Branch @relation(fields: [branchId], references: [id])
+  supplierDeliveryRef String?
+  status    GoodsReceiptStatus @default(DRAFT)
+  receivedByUserId String? @db.Uuid
+  receivedByUser User? @relation(fields: [receivedByUserId], references: [id])
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines GoodsReceiptLine[]
+
+  @@index([branchId, status])
+}
+
+model GoodsReceiptLine {
+  id            String @id @default(uuid(7)) @db.Uuid
+  goodsReceiptId String @db.Uuid
+  goodsReceipt  GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+  productId     String @db.Uuid
+  product       Product @relation(fields: [productId], references: [id])
+  batchNumber   String
+  expiryDate    DateTime?
+  quantity      Decimal @db.Decimal(14, 3)
+  unitCost      Decimal? @db.Decimal(12, 2)
+  /// Linked after the batch record is created in the same transaction.
+  batchId       String? @db.Uuid
+  batch         InventoryBatch? @relation(fields: [batchId], references: [id])
+
+  @@unique([goodsReceiptId, productId, batchNumber])
+  @@index([productId])
+}
+
+// ---------------------------------------------------------------------------
+// Stock operations: counts & transfers
+// ---------------------------------------------------------------------------
+
+model StockCount {
+  id          String @id @default(uuid(7)) @db.Uuid
+  countNumber String @unique
+  branchId    String @db.Uuid
+  branch      Branch @relation(fields: [branchId], references: [id])
+  status      StockCountStatus @default(DRAFT)
+  startedByUserId String? @db.Uuid
+  startedByUser User? @relation("CountStartedBy", fields: [startedByUserId], references: [id])
+  approvedByUserId String? @db.Uuid
+  approvedByUser User? @relation("CountApprovedBy", fields: [approvedByUserId], references: [id])
+  note        String?
+  startedAt   DateTime @default(now())
+  approvedAt  DateTime?
+
+  lines StockCountLine[]
+}
+
+model StockCountLine {
+  id          String @id @default(uuid(7)) @db.Uuid
+  stockCountId String @db.Uuid
+  stockCount  StockCount @relation(fields: [stockCountId], references: [id])
+  productId   String @db.Uuid
+  product     Product @relation(fields: [productId], references: [id])
+  batchId     String? @db.Uuid
+  batch       InventoryBatch? @relation(fields: [batchId], references: [id])
+  systemQtySnapshot Decimal @db.Decimal(14, 3)
+  countedQty  Decimal @db.Decimal(14, 3)
+  /// countedQty - systemQtySnapshot, computed at record time.
+  variance    Decimal @db.Decimal(14, 3)
+
+  @@unique([stockCountId, productId])
+}
+
+model StockTransfer {
+  id      String @id @default(uuid(7)) @db.Uuid
+  number  String @unique
+  fromBranchId String @db.Uuid
+  fromBranch Branch @relation("TransferFrom", fields: [fromBranchId], references: [id])
+  toBranchId   String @db.Uuid
+  toBranch   Branch @relation("TransferTo", fields: [toBranchId], references: [id])
+  status    StockTransferStatus @default(DRAFT)
+  requestedByUserId String? @db.Uuid
+  requestedByUser User? @relation(fields: [requestedByUserId], references: [id])
+  sentAt    DateTime?
+  receivedAt DateTime?
+  createdAt DateTime @default(now())
+
+  lines StockTransferLine[]
+}
+
+model StockTransferLine {
+  id         String @id @default(uuid(7)) @db.Uuid
+  stockTransferId String @db.Uuid
+  stockTransfer StockTransfer @relation(fields: [stockTransferId], references: [id])
+  productId  String @db.Uuid
+  product    Product @relation(fields: [productId], references: [id])
+  batchId    String? @db.Uuid
+  batch      InventoryBatch? @relation(fields: [batchId], references: [id])
+  quantity   Decimal @db.Decimal(14, 3)
+}
+
+// ---------------------------------------------------------------------------
+// Checkout (shared by self-checkout and POS)
+// ---------------------------------------------------------------------------
+
+model CheckoutSession {
+  id      String @id @default(uuid(7)) @db.Uuid
+  branchId String @db.Uuid
+  branch  Branch @relation(fields: [branchId], references: [id])
+  channel CheckoutChannel
+  customerId String? @db.Uuid
+  customer Customer? @relation(fields: [customerId], references: [id])
+  /// SHA-256 of the anonymous session token (possession-based auth for
+  /// self-checkout); null for staff-owned (POS) sessions.
+  sessionTokenHash String? @unique
+  operatorUserId String? @db.Uuid
+  operatorUser User? @relation(fields: [operatorUserId], references: [id])
+  couponId String? @db.Uuid
+  coupon   Coupon? @relation(fields: [couponId], references: [id])
+  status   CheckoutSessionStatus @default(OPEN)
+  loyaltyPointsRequested Int @default(0)
+  /// Authoritative quote from the last server-side calculation (audit trail).
+  quoteSnapshot Json?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items      CheckoutSessionItem[]
+  reservations StockReservation[]
+  order      Order?
+
+  @@index([branchId, status])
+  @@index([expiresAt])
+  @@index([customerId])
+}
+
+model CheckoutSessionItem {
+  id         String @id @default(uuid(7)) @db.Uuid
+  sessionId  String @db.Uuid
+  session    CheckoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  productId  String @db.Uuid
+  product    Product @relation(fields: [productId], references: [id])
+  quantity   Decimal @db.Decimal(12, 3)
+  /// Price observed at scan time, for drift detection at quote time.
+  priceAtScan Decimal @db.Decimal(10, 2)
+  addedAt    DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([sessionId, productId])
+}
+
+// ---------------------------------------------------------------------------
+// Orders, payments, receipts, refunds
+// ---------------------------------------------------------------------------
+
+model Order {
+  id      String @id @default(uuid(7)) @db.Uuid
+  branchId String @db.Uuid
+  branch  Branch @relation(fields: [branchId], references: [id])
+  channel CheckoutChannel
+  customerId String? @db.Uuid
+  customer Customer? @relation(fields: [customerId], references: [id])
+  cashierUserId String? @db.Uuid
+  cashierUser User? @relation(fields: [cashierUserId], references: [id])
+  shiftId  String? @db.Uuid
+  shift    CashierShift? @relation(fields: [shiftId], references: [id])
+  sessionId String? @unique @db.Uuid
+  session  CheckoutSession? @relation(fields: [sessionId], references: [id])
+
+  status        OrderStatus @default(PENDING_PAYMENT)
+  currency      String      @default("INR")
+  subtotal      Decimal     @db.Decimal(12, 2)
+  itemDiscountTotal  Decimal @default(0) @db.Decimal(12, 2)
+  couponDiscountTotal Decimal @default(0) @db.Decimal(12, 2)
+  loyaltyDiscountTotal Decimal @default(0) @db.Decimal(12, 2)
+  taxTotal      Decimal     @db.Decimal(12, 2)
+  roundingAdjustment Decimal @default(0) @db.Decimal(12, 2)
+  grandTotal    Decimal     @db.Decimal(12, 2)
+  /// Unique per checkout attempt — retried confirmations are no-ops.
+  idempotencyKey String    @unique
+  placedAt      DateTime    @default(now())
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+
+  items               OrderItem[]
+  payments            Payment[]
+  refunds             Refund[]
+  receipt             Receipt?
+  couponRedemptions   CouponRedemption[]
+  loyaltyLedgerEntries LoyaltyLedgerEntry[]
+
+  @@index([branchId, placedAt])
+  @@index([status, placedAt])
+  @@index([customerId, placedAt])
+}
+
+model OrderItem {
+  id        String @id @default(uuid(7)) @db.Uuid
+  orderId   String @db.Uuid
+  order     Order  @relation(fields: [orderId], references: [id])
+  productId String @db.Uuid
+  product   Product @relation(fields: [productId], references: [id])
+
+  /// Immutable snapshots — receipts must not change when catalogue prices do.
+  name              String
+  sku               String
+  unit              UnitType
+  unitPrice         Decimal @db.Decimal(10, 2)
+  quantity          Decimal @db.Decimal(12, 3)
+  lineSubtotal      Decimal @db.Decimal(12, 2)
+  lineDiscountTotal Decimal @default(0) @db.Decimal(12, 2)
+  taxableValue      Decimal @db.Decimal(12, 2)
+  lineTaxTotal      Decimal @db.Decimal(12, 2)
+  lineTotal         Decimal @db.Decimal(12, 2)
+  taxSplit          TaxSplit
+  taxInclusive      Boolean
+
+  taxLines OrderItemTaxLine[]
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model OrderItemTaxLine {
+  id       String @id @default(uuid(7)) @db.Uuid
+  orderItemId String @db.Uuid
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id])
+
+  /// Component name: CGST, SGST or IGST.
+  name        String
+  rate        Decimal @db.Decimal(5, 4)
+  basisAmount Decimal @db.Decimal(12, 2)
+  amount      Decimal @db.Decimal(12, 2)
+
+  @@index([orderItemId])
+}
+
+model Payment {
+  id        String @id @default(uuid(7)) @db.Uuid
+  orderId   String @db.Uuid
+  order     Order  @relation(fields: [orderId], references: [id])
+  provider  PaymentProviderKind
+  /// Provider-side reference (e.g. Razorpay payment id); null for CASH.
+  providerRef String?
+  method    String?
+  amount    Decimal @db.Decimal(12, 2)
+  currency  String  @default("INR")
+  status    PaymentStatus @default(INITIATED)
+  /// Client-supplied idempotency key for intent creation.
+  idempotencyKey String @unique
+  requestedAt DateTime @default(now())
+  settledAt  DateTime?
+  failureReason String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refunds Refund[]
+
+  @@unique([provider, providerRef])
+  @@index([orderId])
+  @@index([status, requestedAt])
+}
+
+model Refund {
+  id        String @id @default(uuid(7)) @db.Uuid
+  orderId   String @db.Uuid
+  order     Order  @relation(fields: [orderId], references: [id])
+  paymentId String @db.Uuid
+  payment   Payment @relation(fields: [paymentId], references: [id])
+  amount    Decimal @db.Decimal(12, 2)
+  currency  String  @default("INR")
+  reason    String
+  status    RefundStatus @default(REQUESTED)
+  requestedByUserId String? @db.Uuid
+  requestedByUser User? @relation("RefundRequestedBy", fields: [requestedByUserId], references: [id])
+  approvedByUserId String? @db.Uuid
+  approvedByUser User? @relation("RefundApprovedBy", fields: [approvedByUserId], references: [id])
+  providerRef String?
+  /// Unique per refund attempt for webhook/idempotency safety.
+  idempotencyKey String @unique
+  requestedAt DateTime @default(now())
+  completedAt DateTime?
+  failureReason String?
+
+  @@index([orderId])
+  @@index([status, requestedAt])
+}
+
+model Receipt {
+  id       String @id @default(uuid(7)) @db.Uuid
+  orderId  String @unique @db.Uuid
+  order    Order  @relation(fields: [orderId], references: [id])
+  number   String @unique
+  issuedAt DateTime @default(now())
+  /// "HTML" for now; PDF via the receipt job queue in a later phase.
+  format   String @default("HTML")
+  /// Rendered snapshot: store details, lines, discounts, tax breakdown, total.
+  payload  Json
+}
+
+// ---------------------------------------------------------------------------
+// Promotions, coupons & shifts
+// ---------------------------------------------------------------------------
+
+model Promotion {
+  id        String @id @default(uuid(7)) @db.Uuid
+  name      String
+  kind      PromotionKind
+  /// PERCENT: 0–100; FIXED: amount in minor units rendered as decimal.
+  value     Decimal @db.Decimal(10, 2)
+  maxDiscount Decimal? @db.Decimal(12, 2)
+  minCartValue Decimal? @db.Decimal(12, 2)
+  branchId  String? @db.Uuid
+  branch    Branch? @relation(fields: [branchId], references: [id])
+  productId String? @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id])
+  startsAt  DateTime @default(now())
+  endsAt    DateTime?
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+
+  coupons Coupon[]
+}
+
+model Coupon {
+  id          String @id @default(uuid(7)) @db.Uuid
+  code        String @unique
+  promotionId String @db.Uuid
+  promotion   Promotion @relation(fields: [promotionId], references: [id])
+  /// Null → valid at every branch; set for branch-scoped coupons.
+  branchId    String? @db.Uuid
+  branch      Branch? @relation(fields: [branchId], references: [id])
+  isActive    Boolean @default(true)
+  expiresAt   DateTime?
+  maxRedemptions Int?
+  usageCount  Int     @default(0)
+  createdAt   DateTime @default(now())
+
+  redemptions CouponRedemption[]
+  sessions    CheckoutSession[]
+}
+
+model CouponRedemption {
+  id        String @id @default(uuid(7)) @db.Uuid
+  couponId  String @db.Uuid
+  coupon    Coupon @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  orderId   String? @db.Uuid
+  order     Order? @relation(fields: [orderId], references: [id])
+  customerId String? @db.Uuid
+  customer  Customer? @relation(fields: [customerId], references: [id])
+  usedAt    DateTime @default(now())
+
+  @@unique([couponId, orderId])
+}
+
+model CashierShift {
+  id          String @id @default(uuid(7)) @db.Uuid
+  branchId    String @db.Uuid
+  branch      Branch @relation(fields: [branchId], references: [id])
+  cashierUserId String @db.Uuid
+  cashierUser User   @relation(fields: [cashierUserId], references: [id])
+  status      ShiftStatus @default(OPEN)
+  openedAt    DateTime @default(now())
+  closedAt    DateTime?
+  openingCash Decimal @default(0) @db.Decimal(12, 2)
+  closingCash Decimal? @db.Decimal(12, 2)
+  note        String?
+
+  orders Order[]
+
+  @@index([branchId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id       String @id @default(uuid(7)) @db.Uuid
+  actorUserId String? @db.Uuid
+  actorUser User?  @relation(fields: [actorUserId], references: [id])
+  branchId String? @db.Uuid
+  branch   Branch? @relation(fields: [branchId], references: [id])
+  /// Dotted action, e.g. "inventory.adjustment.approve".
+  action     String
+  entityType String
+  entityId   String  @db.Uuid
+  metadata   Json?
+  requestId  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id       String @id @default(uuid(7)) @db.Uuid
+  branchId String? @db.Uuid
+  branch   Branch? @relation(fields: [branchId], references: [id])
+  kind     NotificationKind
+  title    String
+  body     String
+  data     Json?
+  readAt   DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([kind, createdAt])
+  @@index([branchId, kind, createdAt])
+}

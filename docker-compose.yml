@@ -1,0 +1,37 @@
+name: quickcart
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: quickcart-postgres
+    environment:
+      POSTGRES_USER: quickcart
+      POSTGRES_PASSWORD: quickcart_dev_password
+      POSTGRES_DB: quickcart
+    ports:
+      - '5432:5432'
+    volumes:
+      - quickcart_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U quickcart -d quickcart']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: quickcart-redis
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - quickcart_redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  quickcart_pgdata:
+  quickcart_redisdata:

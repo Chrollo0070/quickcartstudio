@@ -1,0 +1,38 @@
+{
+  "name": "quickcart",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QuickCart — supermarket self-checkout, POS and real-time inventory platform",
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/web",
+    "start": "npm run start --workspace=apps/web",
+    "lint": "npm run lint --workspace=apps/web",
+    "typecheck": "npm run build --workspace=packages/shared && npm run typecheck --workspace=apps/web",
+    "test": "turbo run test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:embedded:up": "node infra/scripts/dev-postgres.mjs up",
+    "db:embedded:down": "node infra/scripts/dev-postgres.mjs down",
+    "db:migrate": "npm run db:migrate --workspace=apps/api",
+    "db:seed": "npm run db:seed --workspace=apps/api",
+    "db:generate": "npm run db:generate --workspace=apps/api",
+    "test:e2e": "playwright test -c e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "prettier": "3.10.1",
+    "turbo": "2.11.13",
+    "typescript": "5.9.3"
+  }
+}

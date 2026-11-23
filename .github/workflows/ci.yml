@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: quickcart
+          POSTGRES_PASSWORD: quickcart_dev_password
+          POSTGRES_DB: quickcart
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quickcart"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://quickcart:quickcart_dev_password@localhost:5432/quickcart?schema=public
+      JWT_ACCESS_SECRET: ci-only-secret-0123456789abcdef0123456789abcdef
+      PAYMENT_WEBHOOK_SECRET: ci-only-secret-0123456789abcdef0123456789abcdef
+      E2E_BASE_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @quickcart/api db:migrate && pnpm db:seed
+      - run: pnpm --filter @quickcart/api build
+      - run: pnpm --filter @quickcart/web build
+      - name: Start API and web
+        run: |
+          (cd apps/api && node dist/main.js > api.log 2>&1 &)
+          (cd apps/web && node node_modules/next/dist/bin/next start --port 3000 > web.log 2>&1 &)
+          sleep 12
+      - run: pnpm exec playwright install chromium --with-deps
+      - run: pnpm test:e2e
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: e2e/test-results/
+          if-no-files-found: ignore

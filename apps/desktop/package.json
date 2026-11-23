@@ -1,0 +1,29 @@
+{
+  "name": "@quickcart/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QuickCart Windows desktop (.exe) application powered by Electron + Next.js standalone",
+  "author": "QuickCart",
+  "main": "dist/main.js",
+  "scripts": {
+    "generate:icons": "node scripts/generate-icons.mjs",
+    "build:main": "tsc -p tsconfig.json",
+    "prepare:standalone": "node scripts/prepare-standalone.mjs",
+    "dev": "npm run build:main && cross-env QUICKCART_DEV_URL=http://localhost:3000/desktop electron .",
+    "start": "npm run build:main && electron .",
+    "dist:win": "npm run generate:icons && npm run build:main && npm run prepare:standalone && electron-builder --win --config electron-builder.yml",
+    "dist:portable": "npm run generate:icons && npm run build:main && npm run prepare:standalone && electron-builder --win portable --config electron-builder.yml",
+    "dist:win:zip": "npm run generate:icons && npm run build:main && npm run prepare:standalone && electron-builder --win zip --config electron-builder.yml -c.win.signAndEditExecutable=false",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "cross-env": "^10.0.0",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.9.3"
+  }
+}

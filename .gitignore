@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Builds
+dist/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+apps/desktop/release/
+apps/desktop/resources/
+
+# Generated code (regenerated with `pnpm db:generate`)
+apps/api/src/generated/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Local databases / data
+infra/.pgdata/
+*.sqlite
+*.sqlite-journal
+
+# Test artifacts
+coverage/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+test-results/

@@ -1,0 +1,73 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-newsreader), Georgia, serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* Warm grocery-front-of-house ramp (unslop direction) */
+  --color-paper: #f7f4ee;
+  --color-card: #ffffff;
+  --color-raised: #efe9df;
+  --color-line: #e8e5df;
+  --color-ink: #1f1b16;
+  --color-ink-2: #5e554a;
+  --color-ink-3: #7b7266;
+  --color-accent: #047857;
+  --color-accent-soft: rgba(4, 120, 87, 0.08);
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-paper text-ink antialiased;
+}
+
+/* Receipt-paper moment: mono figures, dashed tear rules */
+.receipt {
+  @apply bg-card font-mono;
+  box-shadow:
+    0 1px 2px rgba(31, 27, 22, 0.05),
+    0 8px 24px rgba(31, 27, 22, 0.06);
+}
+
+.receipt-tear {
+  border-top: 1px dashed rgba(31, 27, 22, 0.25);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scan sweep: explains the live camera state (transform-only) */
+.scan-sweep {
+  top: 12px;
+  animation: scan-sweep 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes scan-sweep {
+  0% {
+    transform: translateY(0);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translateY(200px);
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 0.9;
+  }
+}
+
+/* Frameless Electron Windows titlebar drag zones */
+.desktop-drag {
+  -webkit-app-region: drag;
+}
+
+.desktop-no-drag {
+  -webkit-app-region: no-drag;
+}
+
